@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.Messenger;
+import android.os.PowerManager;
 import android.os.RemoteException;
 import android.telephony.CellIdentityGsm;
 import android.telephony.CellIdentityLte;
@@ -59,6 +60,8 @@ public class CephloLocationService extends Service {
     ArrayList<Messenger> clients = new ArrayList<Messenger>();
     final Messenger messenger = new Messenger(new IncomingHandler());
 
+    static boolean DEBUG = true;
+
     static final int MSG_REGISTER_CLIENT = 1;
     static final int MSG_UNREGISTER_CLIENT = 2;
     static final int MSG_LOCATION_UPDATE = 2;
@@ -82,12 +85,14 @@ public class CephloLocationService extends Service {
     float gpsSpeed = 0.0f; // or bad stuff happens
     float gpsAccuracy; // observations however bad are uploaded. server can decide.
     Date lastTimeGpsUpdated = null;
-    Date lastTimeUploaded = new Date();
+    Date lastTimeCellsUploaded = new Date();
 
     ArrayList<WifiApObservation> wifiApObservations = new ArrayList<WifiApObservation>();
     ArrayList<CellTowerObservation> cellTowerObservations = new ArrayList<CellTowerObservation>();
 
+    // cell towers as downloaded from the Server
     ArrayList<CellTower> cellTowers = new ArrayList<CellTower>();
+    ArrayList<WifiAp> wifiAps = new ArrayList<WifiAp>();
 
     Thread wifiScanThread;
     Thread dataUploadThread;
@@ -96,12 +101,12 @@ public class CephloLocationService extends Service {
 
     PhoneStateListener phoneStateListener;
     BroadcastReceiver wifiListener;
-
     LocationListener locationListener;
 
     TelephonyManager telephonyManager;
     WifiManager wifiManager;
     LocationManager locationManager;
+    PowerManager powerManager;
 
     private class IncomingHandler extends Handler {
         @Override
@@ -281,6 +286,8 @@ public class CephloLocationService extends Service {
 
     void addCellTowerObservations() {
         // scale max time difference with slowness (the slower, the longer data is accurate)
+        // it turned out this is actually a good way of rate limiting since android GPS update
+        // intervals are not constant
         float maxDiff = 16000 / (gpsSpeed + 1); // no div by zero
         if (maxDiff <= 2000) maxDiff = 2000; // GPS update rate is usually 1Hz
         // only add cell tower observation to list if GPS data is recent enough
@@ -353,7 +360,10 @@ public class CephloLocationService extends Service {
 
             for (int i = 0; i < newCellTowerObservations.size(); i++) {
                 CellTowerObservation observation = newCellTowerObservations.get(i);
-                Toast.makeText(this, observation.toString(), Toast.LENGTH_SHORT).show();
+
+                if (DEBUG) {
+                    Toast.makeText(this, observation.toString(), Toast.LENGTH_SHORT).show();
+                }
                 System.out.println("observation: " + observation.toString());
 
                 cellTowerObservations.add(newCellTowerObservations.get(i));
@@ -369,9 +379,12 @@ public class CephloLocationService extends Service {
             try {
                 CellTowerObservation observation = cellTowerObservations.get(i);
 
+                // contains either WiFi AP or cell tower observations
                 JSONObject data = new JSONObject();
                 data.put("type", "cell");
+
                 JSONObject cellData = new JSONObject();
+                cellData.put("type", observation.type);
                 cellData.put("cid", observation.cid);
                 cellData.put("mcc", observation.mcc);
                 cellData.put("lac", observation.lac);
@@ -380,6 +393,8 @@ public class CephloLocationService extends Service {
                 cellData.put("lon", observation.lon);
                 cellData.put("alt", observation.alt);
                 cellData.put("accuracy", observation.accuracy);
+                cellData.put("timestamp", observation.timestamp.getTime());
+
                 data.put("data", cellData);
                 System.out.println(data.toString());
 
@@ -393,10 +408,8 @@ public class CephloLocationService extends Service {
                     if (httpResponse.getStatusLine().getStatusCode() != 200) {
                         System.out.println("Sending failed");
                     }
-                } catch (UnsupportedEncodingException e) {
-                    e.printStackTrace();
-                } catch (ClientProtocolException e) {
-                    e.printStackTrace();
+
+                    lastTimeCellsUploaded = new Date();
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
@@ -505,7 +518,6 @@ public class CephloLocationService extends Service {
 
     void addWifiApObservation() {
         List<ScanResult> scanResults = wifiManager.getScanResults();
-
 
         for (int i = 0; i < scanResults.size(); i++) {
             ScanResult scanResult = scanResults.get(i);
