@@ -33,7 +33,6 @@ import android.widget.Toast;
 
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
-import org.apache.http.client.ClientProtocolException;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
@@ -47,7 +46,6 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -60,18 +58,19 @@ public class CephloLocationService extends Service {
     ArrayList<Messenger> clients = new ArrayList<Messenger>();
     final Messenger messenger = new Messenger(new IncomingHandler());
 
-    static boolean DEBUG = true;
+    static boolean DEBUG = false;
+
+    public static String LOCATION_DATA_INTENT = "CEPHLO_LOCATION_DATA_INTENT";
 
     static final int MSG_REGISTER_CLIENT = 1;
     static final int MSG_UNREGISTER_CLIENT = 2;
     static final int MSG_LOCATION_UPDATE = 2;
 
+    static final int CAPTURE_PERIODICALLY = 1;
+    static final int CAPTURE_WHEN_SIGNAL_CHANGED = 2; // more effective but uses more battery
     static String SERVER = "ssh.alexselzer.com:7898";
+
     int dataUploadInterval = 2; // should be 2 minutes when not testing
-
-    static int CAPTURE_PERIODICALLY = 1;
-    static int CAPTURE_WHEN_SIGNAL_CHANGED = 2; // more effective but uses more battery
-
     int cellCaptureMethod = CAPTURE_WHEN_SIGNAL_CHANGED;
     int cellCapturePeriod = 4; // seconds
     int wifiCaptureMethod = CAPTURE_PERIODICALLY;
@@ -79,12 +78,16 @@ public class CephloLocationService extends Service {
     long minGpsUpdatePeriod = 800; // ms
     int cellListUpdateInterval = 60;
 
+    boolean dataCollectionEnabled = true;
+
+    // current GPS state
     double latitude;
     double longitude;
     double altitude;
     float gpsSpeed = 0.0f; // or bad stuff happens
     float gpsAccuracy; // observations however bad are uploaded. server can decide.
     Date lastTimeGpsUpdated = null;
+
     Date lastTimeCellsUploaded = new Date();
 
     ArrayList<WifiApObservation> wifiApObservations = new ArrayList<WifiApObservation>();
@@ -127,7 +130,7 @@ public class CephloLocationService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        System.out.println("CephloLocationService started...");
+        System.out.println("CephloLocationService started");
 
         telephonyManager = (TelephonyManager) getSystemService(TELEPHONY_SERVICE);
         wifiManager = (WifiManager) getSystemService(WIFI_SERVICE);
@@ -145,48 +148,40 @@ public class CephloLocationService extends Service {
             }
 
             @Override
-            public void onStatusChanged(String provider, int status, Bundle extras) {
-
-            }
-
+            public void onStatusChanged(String provider, int status, Bundle extras) {}
             @Override
-            public void onProviderEnabled(String provider) {
-
-            }
-
+            public void onProviderEnabled(String provider) {}
             @Override
-            public void onProviderDisabled(String provider) {
-
-            }
+            public void onProviderDisabled(String provider) {}
         };
 
         Criteria gpsCriteria = new Criteria();
         gpsCriteria.setAccuracy(Criteria.ACCURACY_FINE);
         gpsCriteria.setAltitudeRequired(true); // might be useful
-
         locationManager.requestLocationUpdates(minGpsUpdatePeriod, 0.5f /* meters */, gpsCriteria, locationListener, null);
 
         if (!wifiManager.isWifiEnabled()) {
             wifiManager.setWifiEnabled(true);
         }
 
+        // collect WiFi and cell observations periodically
         phoneStateListener = new PhoneStateListener() {
             @Override
             public void onSignalStrengthsChanged(SignalStrength ss) {
-                addCellTowerObservations();
+                collectCellTowerObservations();
             }
         };
-
         wifiListener = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                addWifiApObservation();
+                collectWifiApObservations();
             }
         };
 
         if (cellCaptureMethod == CAPTURE_WHEN_SIGNAL_CHANGED) {
             startListeningCells();
         }
+
         startListeningWifi();
 
         if (wifiCaptureMethod == CAPTURE_PERIODICALLY) {
@@ -213,9 +208,7 @@ public class CephloLocationService extends Service {
                 while (true) {
                     try {
                         Thread.sleep(dataUploadInterval * 1000);
-                    } catch (InterruptedException e) {
-
-                    }
+                    } catch (InterruptedException e) {}
 
                     sendCellTowerObservations();
                 }
@@ -223,10 +216,12 @@ public class CephloLocationService extends Service {
         });
         dataUploadThread.start();
 
+        // Keeps the local cell list synchronised with the database
         cellListUpdaterThread = new Thread(new Runnable() {
             @Override
             public void run() {
                 while (true) {
+                    // getServerCellCount is 0 when there is no internet connection
                     if (getServerCellCount() > (cellTowers.size())) {
                         updateCellList();
                     }
@@ -241,34 +236,28 @@ public class CephloLocationService extends Service {
         });
         cellListUpdaterThread.start();
 
+        // Is supposed to send the location data to all subscribing clients
         locationDataDistributorThread = new Thread(new Runnable() {
             @Override
             public void run() {
-
+            while (true) {
                 CephloLocation location = getLocation();
 
-                Bundle b = new Bundle();
-                b.putDouble("latitude", location.latitide);
-                b.putDouble("longitude", location.longitude);
-                b.putBoolean("usesWifi", location.usesWifi);
-                b.putBoolean("usesCells", location.usesCells);
+                Intent locationDataIntent = new Intent(LOCATION_DATA_INTENT);
 
-                Message msg = Message.obtain(null, MSG_LOCATION_UPDATE);
-                msg.setData(b);
+                locationDataIntent.putExtra("latitude", location.latitide);
+                locationDataIntent.putExtra("longitude", location.longitude);
+                locationDataIntent.putExtra("usesWifi", location.usesWifi);
+                locationDataIntent.putExtra("usesCells", location.usesCells);
 
-                for (int i = 0; i < clients.size(); i++) {
-                    try {
-                        clients.get(i).send(msg);
-                    } catch (RemoteException e) {
-                        e.printStackTrace();
-                    }
-                }
+                sendBroadcast(locationDataIntent);
 
                 try {
-                    Thread.sleep(1000); // TODO change
+                    Thread.sleep(1000);
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
+            }
             }
         });
         locationDataDistributorThread.start();
@@ -284,7 +273,7 @@ public class CephloLocationService extends Service {
         registerReceiver(wifiListener, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
     }
 
-    void addCellTowerObservations() {
+    void collectCellTowerObservations() {
         // scale max time difference with slowness (the slower, the longer data is accurate)
         // it turned out this is actually a good way of rate limiting since android GPS update
         // intervals are not constant
@@ -396,7 +385,6 @@ public class CephloLocationService extends Service {
                 cellData.put("timestamp", observation.timestamp.getTime());
 
                 data.put("data", cellData);
-                System.out.println(data.toString());
 
                 HttpClient httpClient = new DefaultHttpClient();
                 HttpPost httpPost = new HttpPost("http://" + SERVER + "/observation");
@@ -424,6 +412,10 @@ public class CephloLocationService extends Service {
     int getServerCellCount() {
         JSONObject result = null;
         try {
+            String cellCountRes = apiRequest("/cellcount");
+            if (cellCountRes == null)
+                return 0;
+
             result = new JSONObject(apiRequest("/cellcount"));
         } catch (JSONException e) {
             e.printStackTrace();
@@ -448,6 +440,7 @@ public class CephloLocationService extends Service {
         }
 
         if (cells != null) {
+            cellTowers.clear();
             for (int i = 0; i < cells.length(); i++) {
                 try {
                     JSONObject cell = cells.getJSONObject(i);
@@ -457,7 +450,7 @@ public class CephloLocationService extends Service {
                     cellTower.lon = cell.getDouble("lon");
                     cellTower.rssi = cell.getInt("rssi");
 
-                    System.out.println(cellTower.toString());
+                    cellTowers.add(cellTower);
                 } catch (JSONException e) {
                     e.printStackTrace();
                 }
@@ -516,12 +509,11 @@ public class CephloLocationService extends Service {
         return null;
     }
 
-    void addWifiApObservation() {
+    void collectWifiApObservations() {
         List<ScanResult> scanResults = wifiManager.getScanResults();
 
         for (int i = 0; i < scanResults.size(); i++) {
             ScanResult scanResult = scanResults.get(i);
-
         }
     }
 
@@ -530,17 +522,31 @@ public class CephloLocationService extends Service {
 
         List<CellTower> nearbyTowers = getNearbyCellTowers();
 
-        System.out.println(nearbyTowers.toString() + " " + cellTowers.toString());
+        System.out.println("nearby:" + nearbyTowers.toString() + " " + cellTowers.toString());
 
         double sumX = 0;
         double sumY = 0;
+        int cellsMatch = 0; // There might be some cells not in the database (or bogus cells)
+
+        for (int i = 0; i < cellTowers.size(); i++) {
+            CellTower tower = cellTowers.get(i);
+            int cid = cellTowers.get(i).cid;
+
+            for (int j = 0; j < nearbyTowers.size(); j++) {
+                if (nearbyTowers.get(j).cid == cid) {
+                    sumX += tower.lat;
+                    sumY += tower.lon;
+                    cellsMatch++;
+                }
+            }
+        }
+
 
         locationEstimate.usesCells = true;
         locationEstimate.usesWifi = false;
 
-        locationEstimate.latitide = sumX / nearbyTowers.size();
-        locationEstimate.longitude = sumY / nearbyTowers.size();
-
+        locationEstimate.latitide = sumX / cellsMatch;
+        locationEstimate.longitude = sumY / cellsMatch;
 
         return locationEstimate;
     }

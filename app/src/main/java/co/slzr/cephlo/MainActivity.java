@@ -97,13 +97,10 @@ public class MainActivity extends FragmentActivity implements ActionBar.TabListe
     @Override
     public void onDestroy() {
         super.onDestroy();
-
-
     }
 
     boolean locationServiceIsRunning() {
         // http://stackoverflow.com/questions/600207/how-to-check-if-a-service-is-running-on-android
-
         ActivityManager activityManager = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
         for (ActivityManager.RunningServiceInfo service : activityManager.getRunningServices(Integer.MAX_VALUE)) {
             if (CephloLocationService.class.getName().equals(service.service.getClassName())) {
