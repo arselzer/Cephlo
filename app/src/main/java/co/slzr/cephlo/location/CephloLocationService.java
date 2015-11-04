@@ -54,17 +54,9 @@ import java.util.List;
  * Created by as on 01/09/15.
  */
 public class CephloLocationService extends Service {
-    NotificationManager nm;
-    ArrayList<Messenger> clients = new ArrayList<Messenger>();
-    final Messenger messenger = new Messenger(new IncomingHandler());
-
     static boolean DEBUG = false;
 
     public static String LOCATION_DATA_INTENT = "CEPHLO_LOCATION_DATA_INTENT";
-
-    static final int MSG_REGISTER_CLIENT = 1;
-    static final int MSG_UNREGISTER_CLIENT = 2;
-    static final int MSG_LOCATION_UPDATE = 2;
 
     static final int CAPTURE_PERIODICALLY = 1;
     static final int CAPTURE_WHEN_SIGNAL_CHANGED = 2; // more effective but uses more battery
@@ -75,7 +67,7 @@ public class CephloLocationService extends Service {
     int cellCapturePeriod = 4; // seconds
     int wifiCaptureMethod = CAPTURE_PERIODICALLY;
     int wifiScanInterval = 12; // should usually be > 60 sec, but less when collecting data
-    long minGpsUpdatePeriod = 800; // ms
+    long minGpsUpdatePeriod = 400; // ms
     int cellListUpdateInterval = 60;
 
     boolean dataCollectionEnabled = true;
@@ -111,23 +103,6 @@ public class CephloLocationService extends Service {
     LocationManager locationManager;
     PowerManager powerManager;
 
-    private class IncomingHandler extends Handler {
-        @Override
-        public void handleMessage(Message msg) {
-            switch (msg.what) {
-                case MSG_REGISTER_CLIENT:
-                    clients.add(msg.replyTo);
-                    break;
-                case MSG_UNREGISTER_CLIENT:
-                    clients.remove(msg.replyTo);
-                    break;
-                default:
-                    super.handleMessage(msg);
-                    break;
-            }
-        }
-    }
-
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         System.out.println("CephloLocationService started");
@@ -135,7 +110,9 @@ public class CephloLocationService extends Service {
         telephonyManager = (TelephonyManager) getSystemService(TELEPHONY_SERVICE);
         wifiManager = (WifiManager) getSystemService(WIFI_SERVICE);
         locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
+        powerManager = (PowerManager) getSystemService(POWER_SERVICE);
 
+        // GPS data is always as new as possible
         locationListener = new LocationListener() {
             @Override
             public void onLocationChanged(Location location) {
@@ -158,6 +135,7 @@ public class CephloLocationService extends Service {
         Criteria gpsCriteria = new Criteria();
         gpsCriteria.setAccuracy(Criteria.ACCURACY_FINE);
         gpsCriteria.setAltitudeRequired(true); // might be useful
+
         locationManager.requestLocationUpdates(minGpsUpdatePeriod, 0.5f /* meters */, gpsCriteria, locationListener, null);
 
         if (!wifiManager.isWifiEnabled()) {
@@ -211,6 +189,7 @@ public class CephloLocationService extends Service {
                     } catch (InterruptedException e) {}
 
                     sendCellTowerObservations();
+                    sendWifiApObservations();
                 }
             }
         });
@@ -243,14 +222,18 @@ public class CephloLocationService extends Service {
             while (true) {
                 CephloLocation location = getLocation();
 
-                Intent locationDataIntent = new Intent(LOCATION_DATA_INTENT);
+                // only broadcast the location when there are actually cells...
+                if (location != null) {
 
-                locationDataIntent.putExtra("latitude", location.latitide);
-                locationDataIntent.putExtra("longitude", location.longitude);
-                locationDataIntent.putExtra("usesWifi", location.usesWifi);
-                locationDataIntent.putExtra("usesCells", location.usesCells);
+                    Intent locationDataIntent = new Intent(LOCATION_DATA_INTENT);
 
-                sendBroadcast(locationDataIntent);
+                    locationDataIntent.putExtra("latitude", location.latitide);
+                    locationDataIntent.putExtra("longitude", location.longitude);
+                    locationDataIntent.putExtra("usesWifi", location.usesWifi);
+                    locationDataIntent.putExtra("usesCells", location.usesCells);
+
+                    sendBroadcast(locationDataIntent);
+                }
 
                 try {
                     Thread.sleep(1000);
@@ -269,8 +252,16 @@ public class CephloLocationService extends Service {
         telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
     }
 
+    void stopListeningCells() {
+        telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE);
+    }
+
     void startListeningWifi() {
         registerReceiver(wifiListener, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
+    }
+
+    public void stopListeningWifi() {
+        unregisterReceiver(wifiListener);
     }
 
     void collectCellTowerObservations() {
@@ -306,6 +297,7 @@ public class CephloLocationService extends Service {
                     observation.cid = cellIdentity.getCid();
                     observation.lac = cellIdentity.getLac();
                     observation.mcc = cellIdentity.getMcc();
+                    observation.mnc = cellIdentity.getMnc();
                     observation.rssi = c.getCellSignalStrength().getDbm();
                 } else if (cell.getClass() == CellInfoGsm.class) {
                     CellInfoGsm c = (CellInfoGsm) cell;
@@ -315,6 +307,7 @@ public class CephloLocationService extends Service {
                     observation.cid = cellIdentity.getCid();
                     observation.lac = cellIdentity.getLac();
                     observation.mcc = cellIdentity.getMcc();
+                    observation.mnc = cellIdentity.getMnc();
                     observation.rssi = c.getCellSignalStrength().getDbm();
                 } else if (cell.getClass() == CellInfoLte.class) {
                     CellInfoLte c = (CellInfoLte) cell;
@@ -324,6 +317,7 @@ public class CephloLocationService extends Service {
                     observation.cid = cellIdentity.getCi();
                     observation.lac = 0;
                     observation.mcc = cellIdentity.getMcc();
+                    observation.mnc = cellIdentity.getMnc();
                     observation.rssi = c.getCellSignalStrength().getDbm();
                 }
 
@@ -376,6 +370,7 @@ public class CephloLocationService extends Service {
                 cellData.put("type", observation.type);
                 cellData.put("cid", observation.cid);
                 cellData.put("mcc", observation.mcc);
+                cellData.put("mnc", observation.mnc);
                 cellData.put("lac", observation.lac);
                 cellData.put("rssi", observation.rssi);
                 cellData.put("lat", observation.lat);
@@ -407,6 +402,70 @@ public class CephloLocationService extends Service {
             }
         }
         cellTowerObservations.clear();
+    }
+
+    void collectWifiApObservations() {
+        List<ScanResult> scanResults = wifiManager.getScanResults();
+
+        for (int i = 0; i < scanResults.size(); i++) {
+            ScanResult scanResult = scanResults.get(i);
+
+            WifiApObservation observation = new WifiApObservation();
+            observation.bssid = scanResult.BSSID;
+            observation.ssid = scanResult.SSID;
+            observation.frequency = scanResult.frequency;
+            observation.timestamp = new Date();
+            observation.rssi = scanResult.level;
+            observation.lat = latitude;
+            observation.lon = longitude;
+            observation.alt = altitude;
+            observation.accuracy = gpsAccuracy;
+
+            wifiApObservations.add(observation);
+        }
+    }
+
+    void sendWifiApObservations() {
+        for (int i = 0; i < wifiApObservations.size(); i++) {
+            WifiApObservation apObservation = wifiApObservations.get(i);
+            JSONObject data = new JSONObject();
+
+            try {
+                data.put("type", "wifi");
+
+                JSONObject wifiApData = new JSONObject();
+                wifiApData.put("rssi", apObservation.rssi);
+                wifiApData.put("timestamp", apObservation.timestamp);
+                wifiApData.put("frequency", apObservation.frequency);
+                wifiApData.put("ssid", apObservation.ssid);
+                wifiApData.put("bssid", apObservation.bssid);
+                wifiApData.put("lat", apObservation.lat);
+                wifiApData.put("lon", apObservation.lon);
+                wifiApData.put("alt", apObservation.alt);
+                wifiApData.put("accuracy", apObservation.accuracy);
+                data.put("data", wifiApData);
+
+                HttpClient httpClient = new DefaultHttpClient();
+                HttpPost httpPost = new HttpPost("http://" + SERVER + "/observation");
+                try {
+                    httpPost.setEntity(new StringEntity(data.toString(), "UTF8"));
+                    httpPost.setHeader("Content-Type", "application/json");
+
+                    HttpResponse httpResponse = httpClient.execute(httpPost);
+                    if (httpResponse.getStatusLine().getStatusCode() != 200) {
+                        System.out.println("Sending failed");
+                    }
+
+                    lastTimeCellsUploaded = new Date();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
+        }
+        wifiApObservations.clear();
     }
 
     int getServerCellCount() {
@@ -509,14 +568,6 @@ public class CephloLocationService extends Service {
         return null;
     }
 
-    void collectWifiApObservations() {
-        List<ScanResult> scanResults = wifiManager.getScanResults();
-
-        for (int i = 0; i < scanResults.size(); i++) {
-            ScanResult scanResult = scanResults.get(i);
-        }
-    }
-
     CephloLocation getLocation() {
         CephloLocation locationEstimate = new CephloLocation();
 
@@ -547,6 +598,11 @@ public class CephloLocationService extends Service {
 
         locationEstimate.latitide = sumX / cellsMatch;
         locationEstimate.longitude = sumY / cellsMatch;
+
+        if ((locationEstimate.latitide == 0 && locationEstimate.longitude == 0)
+                || Double.isNaN(locationEstimate.latitide)
+                || Double.isNaN(locationEstimate.longitude))
+            return null;
 
         return locationEstimate;
     }
@@ -584,15 +640,7 @@ public class CephloLocationService extends Service {
         }
 
         return towers;
-    }
-
-    public void stopListeningCells() {
-        telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE);
-    }
-
-    public void stopListeningWifi() {
-        unregisterReceiver(wifiListener);
-    }
+    };
 
     @Override
     public void onDestroy() {

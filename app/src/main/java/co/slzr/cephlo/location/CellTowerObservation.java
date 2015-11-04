@@ -15,6 +15,7 @@ public class CellTowerObservation {
     public String type; // "wcdma", "gsm", "lte" even though this is never accurate \(oo)/
     public int cid;
     public int mcc;
+    public int mnc;
     public int lac; // except for LTE cells
     public int rssi; // dBm (debcibel milliwatt)
     Date timestamp;

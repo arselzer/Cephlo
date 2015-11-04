@@ -7,6 +7,7 @@ public class WifiAp {
     String bssid;
     String ssid;
     int rssi;
+    int frequency;
 
     long lat;
     long lon;
