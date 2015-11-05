@@ -76,7 +76,9 @@ public class CephloLocationService extends Service {
     double latitude;
     double longitude;
     double altitude;
-    float gpsSpeed = 0.0f; // or bad stuff happens
+
+    double gpsSpeed = 0.0; // or bad stuff happens
+    double averageSpeed = 0.0;
     float gpsAccuracy; // observations however bad are uploaded. server can decide.
     Date lastTimeGpsUpdated = null;
 
@@ -118,10 +120,15 @@ public class CephloLocationService extends Service {
             public void onLocationChanged(Location location) {
                 latitude = location.getLatitude();
                 longitude = location.getLongitude();
+
                 altitude = location.getAltitude();
                 gpsAccuracy = location.getAccuracy();
                 gpsSpeed = location.getSpeed();
                 lastTimeGpsUpdated = new Date();
+
+                // exponential moving average filter
+                averageSpeed = 0.25 * gpsSpeed + 0.75 * averageSpeed;
+                System.out.println(averageSpeed + " " + gpsSpeed);
             }
 
             @Override
@@ -268,11 +275,12 @@ public class CephloLocationService extends Service {
         // scale max time difference with slowness (the slower, the longer data is accurate)
         // it turned out this is actually a good way of rate limiting since android GPS update
         // intervals are not constant
-        float maxDiff = 16000 / (gpsSpeed + 1); // no div by zero
+        double maxDiff = 16000 / (gpsSpeed + 1); // no div by zero
         if (maxDiff <= 2000) maxDiff = 2000; // GPS update rate is usually 1Hz
         // only add cell tower observation to list if GPS data is recent enough
         if (lastTimeGpsUpdated != null
-                && (new Date().getTime() - lastTimeGpsUpdated.getTime()) < maxDiff) {
+                && (new Date().getTime() - lastTimeGpsUpdated.getTime()) < maxDiff
+                && averageSpeed > 1) {
 
             ArrayList<CellTowerObservation> newCellTowerObservations =
                     new ArrayList<CellTowerObservation>();
@@ -353,7 +361,7 @@ public class CephloLocationService extends Service {
             }
         }
         else {
-            System.out.println("bad GPS data, did not log cell data.");
+            System.out.println("did not log cell data because of GPS values");
         }
     }
 
